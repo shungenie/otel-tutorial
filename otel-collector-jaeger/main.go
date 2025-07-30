@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"time"
@@ -17,12 +18,16 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	otlploggrpc "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -89,6 +94,27 @@ func initMeterProvider(ctx context.Context, res *resource.Resource, conn *grpc.C
 	return meterProvider.Shutdown, nil
 }
 
+// 既存の initConn() で作った gRPC Conn を再利用
+func initLoggerProvider(ctx context.Context, res *resource.Resource, conn *grpc.ClientConn) (*slog.Logger, error) {
+	logExp, err := otlploggrpc.New(ctx, otlploggrpc.WithGRPCConn(conn))
+	if err != nil {
+		return nil, err
+	}
+	lp := sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExp)),
+	)
+	logger := otelslog.NewLogger(serviceName.Value.Type().String(), otelslog.WithLoggerProvider(lp))
+	return logger, nil
+}
+
+func newLogExporter() (sdklog.Exporter, error) {
+	return stdoutlog.New(
+		stdoutlog.WithWriter(os.Stdout),
+		stdoutlog.WithPrettyPrint(),
+	)
+}
+
 func main() {
 	log.Printf("Waiting for connection...")
 
@@ -110,23 +136,28 @@ func main() {
 		log.Fatal(err)
 	}
 
+	logger, err := initLoggerProvider(ctx, res, conn)
+	if err != nil {
+		panic(fmt.Sprintf("error setting up OTel Log SDK - %v", err))
+	}
+
 	shutdownTracerProvider, err := initTracerProvider(ctx, res, conn)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error(fmt.Sprintf("failed to initialize TracerProvider: %s", err))
 	}
 	defer func() {
 		if err := shutdownTracerProvider(ctx); err != nil {
-			log.Fatalf("failed to shutdown TracerProvider: %s", err)
+			logger.Error(fmt.Sprintf("failed to shutdown TracerProvider: %s", err))
 		}
 	}()
 
 	shutdownMeterProvider, err := initMeterProvider(ctx, res, conn)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error(fmt.Sprintf("failed to initialize MeterProvider: %s", err))
 	}
 	defer func() {
 		if err := shutdownMeterProvider(ctx); err != nil {
-			log.Fatalf("failed to shutdown MeterProvider: %s", err)
+			logger.Error(fmt.Sprintf("failed to shutdown MeterProvider: %s", err))
 		}
 	}()
 
@@ -156,11 +187,11 @@ func main() {
 	for i := 0; i < 10; i++ {
 		_, iSpan := tracer.Start(ctx, fmt.Sprintf("Sample-%d", i))
 		runCount.Add(ctx, 1, metric.WithAttributes(commonAttrs...))
-		log.Printf("Doing really hard work (%d / 10)\n", i+1)
+		logger.Info(fmt.Sprintf("Doing really hard work (%d / 10)\n", i+1))
 
 		<-time.After(time.Second)
 		iSpan.End()
 	}
 
-	log.Printf("Done!")
+	logger.Info("Done!")
 }
