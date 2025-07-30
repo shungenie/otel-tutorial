@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"time"
+	"log"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
@@ -11,8 +12,9 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/log"
+	otellog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -43,13 +45,30 @@ func setupOTelSDK(ctx context.Context) (shutdown func(context.Context) error, er
 	otel.SetTextMapPropagator(prop)
 
 	// トレースプロバイダーのセットアップ。
-	tracerProvider, err := newTracerProvider()
+	conn, err := initConn()
 	if err != nil {
-		handleErr(err)
-		return
+		log.Fatal(err)
 	}
-	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
-	otel.SetTracerProvider(tracerProvider)
+
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			// The service name used to display traces in backends
+			serviceName,
+		),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	shutdownTracerProvider, err := initTracerProvider(ctx, res, conn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := shutdownTracerProvider(ctx); err != nil {
+			log.Fatalf("failed to shutdown TracerProvider: %s", err)
+		}
+	}()
 
 	// メータープロバイダーのセットアップ。
 	meterProvider, err := newMeterProvider()
@@ -108,14 +127,14 @@ func newMeterProvider() (*metric.MeterProvider, error) {
 	return meterProvider, nil
 }
 
-func newLoggerProvider() (*log.LoggerProvider, error) {
+func newLoggerProvider() (*otellog.LoggerProvider, error) {
 	logExporter, err := stdoutlog.New()
 	if err != nil {
 		return nil, err
 	}
 
-	loggerProvider := log.NewLoggerProvider(
-		log.WithProcessor(log.NewBatchProcessor(logExporter)),
+	loggerProvider := otellog.NewLoggerProvider(
+		otellog.WithProcessor(otellog.NewBatchProcessor(logExporter)),
 	)
 	return loggerProvider, nil
 }
