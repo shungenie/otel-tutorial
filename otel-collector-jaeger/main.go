@@ -15,15 +15,12 @@ import (
 	"os/signal"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	otlploggrpc "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	otlploghttp "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -31,32 +28,19 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
 var serviceName = semconv.ServiceNameKey.String("test-service")
 
-// Initialize a gRPC connection to be used by both the tracer and meter
-// providers.
-func initConn() (*grpc.ClientConn, error) {
-	// It connects the OpenTelemetry Collector through local gRPC connection.
-	// You may replace `localhost:14317` with your endpoint.
-	conn, err := grpc.NewClient("localhost:14317",
-		// Note the use of insecure transport here. TLS is recommended in production.
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create gRPC connection to collector: %w", err)
-	}
-
-	return conn, err
-}
-
 // Initializes an OTLP exporter, and configures the corresponding trace provider.
-func initTracerProvider(ctx context.Context, res *resource.Resource, conn *grpc.ClientConn) (func(context.Context) error, error) {
+func initTracerProvider(ctx context.Context, res *resource.Resource) (func(context.Context) error, error) {
 	// Set up a trace exporter
-	traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
+	traceExporter, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithInsecure(),
+		otlptracehttp.WithEndpoint("localhost:14318"),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
 	}
@@ -79,8 +63,11 @@ func initTracerProvider(ctx context.Context, res *resource.Resource, conn *grpc.
 }
 
 // Initializes an OTLP exporter, and configures the corresponding meter provider.
-func initMeterProvider(ctx context.Context, res *resource.Resource, conn *grpc.ClientConn) (func(context.Context) error, error) {
-	metricExporter, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithGRPCConn(conn))
+func initMeterProvider(ctx context.Context, res *resource.Resource) (func(context.Context) error, error) {
+	metricExporter, err := otlpmetrichttp.New(ctx,
+		otlpmetrichttp.WithInsecure(),
+		otlpmetrichttp.WithEndpoint("localhost:14318"),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create metrics exporter: %w", err)
 	}
@@ -94,9 +81,11 @@ func initMeterProvider(ctx context.Context, res *resource.Resource, conn *grpc.C
 	return meterProvider.Shutdown, nil
 }
 
-// 既存の initConn() で作った gRPC Conn を再利用
-func initLoggerProvider(ctx context.Context, res *resource.Resource, conn *grpc.ClientConn) (*slog.Logger, error) {
-	logExp, err := otlploggrpc.New(ctx, otlploggrpc.WithGRPCConn(conn))
+func initLoggerProvider(ctx context.Context, res *resource.Resource) (*slog.Logger, error) {
+	logExp, err := otlploghttp.New(ctx,
+		otlploghttp.WithInsecure(),
+		otlploghttp.WithEndpoint("localhost:14318"),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +93,7 @@ func initLoggerProvider(ctx context.Context, res *resource.Resource, conn *grpc.
 		sdklog.WithResource(res),
 		sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExp)),
 	)
-	logger := otelslog.NewLogger(serviceName.Value.Type().String(), otelslog.WithLoggerProvider(lp))
+	logger := otelslog.NewLogger(serviceName.Value.AsString(), otelslog.WithLoggerProvider(lp))
 	return logger, nil
 }
 
@@ -121,11 +110,6 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	conn, err := initConn()
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			// The service name used to display traces in backends
@@ -136,12 +120,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	logger, err := initLoggerProvider(ctx, res, conn)
+	logger, err := initLoggerProvider(ctx, res)
 	if err != nil {
 		panic(fmt.Sprintf("error setting up OTel Log SDK - %v", err))
 	}
 
-	shutdownTracerProvider, err := initTracerProvider(ctx, res, conn)
+	shutdownTracerProvider, err := initTracerProvider(ctx, res)
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to initialize TracerProvider: %s", err))
 	}
@@ -151,7 +135,7 @@ func main() {
 		}
 	}()
 
-	shutdownMeterProvider, err := initMeterProvider(ctx, res, conn)
+	shutdownMeterProvider, err := initMeterProvider(ctx, res)
 	if err != nil {
 		logger.Error(fmt.Sprintf("failed to initialize MeterProvider: %s", err))
 	}

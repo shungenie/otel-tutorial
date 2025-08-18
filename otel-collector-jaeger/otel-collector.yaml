@@ -4,14 +4,14 @@
 receivers:
   otlp:
     protocols:
-      grpc:
-        endpoint: 0.0.0.0:14317
+      http:
+        endpoint: 0.0.0.0:14318
 processors:
 extensions:
   health_check: {}
 exporters:
   otlp:
-    endpoint: jaeger:14317
+    endpoint: jaeger:14318
     tls:
       insecure: true
   prometheus:

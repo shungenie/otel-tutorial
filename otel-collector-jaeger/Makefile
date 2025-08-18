@@ -4,5 +4,5 @@ run: up
 up: 
 	docker compose up -d
 
-down:
+stop:
 	docker compose down
